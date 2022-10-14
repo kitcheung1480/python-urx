@@ -20,7 +20,6 @@ __copyright__ = "Copyright 2011, NTNU/SINTEF Raufoss Manufacturing AS"
 __credits__ = ["Morten Lind, Olivier Roulet-Dubonnet"]
 __license__ = "LGPLv3"
 
-
 class URRTMonitor(threading.Thread):
 
     # Struct for revision of the UR controller giving 692 bytes
@@ -30,9 +29,7 @@ class URRTMonitor(threading.Thread):
     # pose is not included!
     rtstruct540 = struct.Struct('>d6d6d6d6d6d6d6d6d18d')
 
-    rtstruct5_1 = struct.Struct('>d1d6d6d6d6d6d6d6d6d6d6d6d6d6d6d1d6d1d1d1d6d1d6d3d6d1d1d1d1d1d1d1d6d1d1d3d3d')
-
-    def __init__(self, urHost, urFirm=None):
+    def __init__(self, urHost):
         threading.Thread.__init__(self)
         self.logger = logging.getLogger(self.__class__.__name__)
         self.daemon = True
@@ -42,7 +39,6 @@ class URRTMonitor(threading.Thread):
         self._rtSock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._rtSock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         self._urHost = urHost
-        self.urFirm = urFirm
         # Package data variables
         self._timestamp = None
         self._ctrlTimestamp = None
@@ -50,12 +46,6 @@ class URRTMonitor(threading.Thread):
         self._qTarget = None
         self._tcp = None
         self._tcp_force = None
-        self._joint_temperature = None
-        self._joint_voltage = None
-        self._joint_current = None
-        self._main_voltage = None
-        self._robot_voltage = None
-        self._robot_current = None
         self.__recvTime = 0
         self._last_ctrl_ts = 0
         # self._last_ts = 0
@@ -64,6 +54,9 @@ class URRTMonitor(threading.Thread):
         self._buffer = []
         self._csys = None
         self._csys_lock = threading.Lock()
+
+        self.start()
+        self.wait()  # make sure we got some data before someone calls us
 
     def set_csys(self, csys):
         with self._csys_lock:
@@ -82,9 +75,9 @@ class URRTMonitor(threading.Thread):
         self.__recvTime = recvTime
         return pkg
 
-    def wait(self):
+    def wait(self, timeout=0.05):
         with self._dataEvent:
-            self._dataEvent.wait()
+            self._dataEvent.wait(timeout)
 
     def q_actual(self, wait=False, timestamp=False):
         """ Get the actual joint position vector."""
@@ -116,110 +109,97 @@ class URRTMonitor(threading.Thread):
                 return self._timestamp, self._qTarget
             else:
                 return self._qTarget
-    getTarget = q_target
 
-    def tcf_pose(self, wait=False, timestamp=False, ctrlTimestamp=False):
+    def tcp_pose(self, wait=False, timestamp=False, ctrlTimestamp=False):
         """ Return the tool pose values."""
         if wait:
             self.wait()
         with self._dataAccess:
-            tcf = self._tcp
+            tcp = self._tcp
             if ctrlTimestamp or timestamp:
-                ret = [tcf]
+                ret = [tcp]
                 if timestamp:
                     ret.insert(-1, self._timestamp)
                 if ctrlTimestamp:
                     ret.insert(-1, self._ctrlTimestamp)
                 return ret
             else:
-                return tcf
-    getTCF = tcf_pose
+                return tcp
 
-    def tcf_force(self, wait=False, timestamp=False):
+    def tcp_force(self, wait=False, timestamp=False):
         """ Get the tool force. The returned tool force is a
         six-vector of three forces and three moments."""
         if wait:
             self.wait()
         with self._dataAccess:
-            # tcf = self._fwkin(self._qActual)
-            tcf_force = self._tcp_force
+            # tcp = self._fwkin(self._qActual)
+            tcp_force = self._tcp_force
             if timestamp:
-                return self._timestamp, tcf_force
+                return self._timestamp, tcp_force
             else:
-                return tcf_force
-    getTCFForce = tcf_force
+                return tcp_force
 
-    def joint_temperature(self, wait=False, timestamp=False):
-        """ Get the joint temperature."""
+    def robot_mode(self, wait=False):
         if wait:
             self.wait()
-        with self._dataAccess:
-            joint_temperature = self._joint_temperature
-            if timestamp:
-                return self._timestamp, joint_temperature
-            else:
-                return joint_temperature
-    getJOINTTemperature = joint_temperature
+        with self._dataEvent:
+            return self._robotMode
+    
+    def is_running(self, wait=False):
+        robot_mode = self.robot_mode(wait)
+        print("robot_mode", robot_mode)
+        return robot_mode == 7
 
-    def joint_voltage(self, wait=False, timestamp=False):
-        """ Get the joint voltage."""
+    def program_state(self, wait=False):
         if wait:
             self.wait()
-        with self._dataAccess:
-            joint_voltage = self._joint_voltage
-            if timestamp:
-                return self._timestamp, joint_voltage
-            else:
-                return joint_voltage
-    getJOINTVoltage = joint_voltage
-
-    def joint_current(self, wait=False, timestamp=False):
-        """ Get the joint current."""
+        with self._dataEvent:
+            print("program state", self._state)
+            return self._state
+    
+    def digital_input(self, index = None, wait=False):
         if wait:
             self.wait()
-        with self._dataAccess:
-            joint_current = self._joint_current
-            if timestamp:
-                return self._timestamp, joint_current
+        with self._dataEvent:
+            digit_in = self._digit_in
+            if index is None:
+                bits = []
+                for i in range(8):
+                    bits.append(digit_in >> i & 1)
+                return bits
             else:
-                return joint_current
-    getJOINTCurrent = joint_current
+                bit = digit_in >> index & 1
+                return bit
 
-    def main_voltage(self, wait=False, timestamp=False):
-        """ Get the Safety Control Board: Main voltage."""
+    def digital_output(self, index = None, wait=False):
         if wait:
             self.wait()
-        with self._dataAccess:
-            main_voltage = self._main_voltage
-            if timestamp:
-                return self._timestamp, main_voltage
+        with self._dataEvent:
+            digit_out = self._digit_out
+            if index is None:
+                bits = []
+                for i in range(8):
+                    bits.append(digit_out >> i & 1)
+                return bits
             else:
-                return main_voltage
-    getMAINVoltage = main_voltage
+                bit = digit_out >> index & 1
+                return bit
 
-    def robot_voltage(self, wait=False, timestamp=False):
-        """ Get the Safety Control Board: Robot voltage (48V)."""
-        if wait:
-            self.wait()
-        with self._dataAccess:
-            robot_voltage = self._robot_voltage
-            if timestamp:
-                return self._timestamp, robot_voltage
-            else:
-                return robot_voltage
-    getROBOTVoltage = robot_voltage
 
-    def robot_current(self, wait=False, timestamp=False):
-        """ Get the Safety Control Board: Robot current."""
-        if wait:
-            self.wait()
-        with self._dataAccess:
-            robot_current = self._robot_current
-            if timestamp:
-                return self._timestamp, robot_current
-            else:
-                return robot_current
-    getROBOTCurrent = robot_current
+    # ============================================================================================
+    # custome send program in rtmon
+    def send_program(self, prog):
+        """
+        send program to robot in URRobot format
+        If another program is send while a program is running the first program is aborded.
+        """
+        prog.strip()
+        # self.logger.debug("Enqueueing program: %s", prog)
+        if not isinstance(prog, bytes):
+            prog = prog.encode()
+
+        self._rtSock.send(prog + b"\n")
+    # ============================================================================================
 
     def __recv_rt_data(self):
         head = self.__recv_bytes(4)
@@ -230,20 +210,15 @@ class URRTMonitor(threading.Thread):
             'Received header telling that package is %s bytes long',
             pkgsize)
         payload = self.__recv_bytes(pkgsize - 4)
-        if self.urFirm is not None:
-            if self.urFirm == 5.1:
-                unp = self.rtstruct5_1.unpack(payload[:self.rtstruct5_1.size])
+        if pkgsize >= 692:
+            unp = self.rtstruct692.unpack(payload[:self.rtstruct692.size])
+        elif pkgsize >= 540:
+            unp = self.rtstruct540.unpack(payload[:self.rtstruct540.size])
         else:
-            if pkgsize >= 692:
-                unp = self.rtstruct692.unpack(payload[:self.rtstruct692.size])
-            elif pkgsize >= 540:
-                unp = self.rtstruct540.unpack(payload[:self.rtstruct540.size])
-            else:
-                self.logger.warning(
-                    'Error, Received packet of length smaller than 540: %s ',
-                    pkgsize)
-                return
-        
+            self.logger.warning(
+                'Error, Received packet of length smaller than 540: %s ',
+                pkgsize)
+            return
 
         with self._dataAccess:
             self._timestamp = timestamp
@@ -259,18 +234,39 @@ class URRTMonitor(threading.Thread):
                     "Error the controller failed to send us a packet: time since last packet %s s ",
                     self._ctrlTimestamp - self._last_ctrl_ts)
             self._last_ctrl_ts = self._ctrlTimestamp
+            """
             self._qActual = np.array(unp[31:37])
             self._qdActual = np.array(unp[37:43])
             self._qTarget = np.array(unp[1:7])
             self._tcp_force = np.array(unp[67:73])
-            self._tcp = np.array(unp[73:79])            
-            self._joint_current = np.array(unp[43:49])
-            if self.urFirm >= 3.1:
-                self._joint_temperature = np.array(unp[86:92])
-                self._joint_voltage = np.array(unp[124:130])
-                self._main_voltage = unp[121]
-                self._robot_voltage = unp[122]
-                self._robot_current = unp[123]
+            self._tcp = np.array(unp[73:79])
+            """
+            # print(len(unp))
+            self._qTarget = np.array(unp[1:7])
+            # self._qdTarget = np.array(unp[7:13])
+            # self._qddTarget = np.array(unp[13:19])
+            # self._I_Target = np.array(unp[19:25])
+            # self._M_Target = np.array(unp[25:31])
+            self._qActual = np.array(unp[31:37])
+            self._qdActual = np.array(unp[37:43])
+            # self._IActual = np.array(unp[43:49])
+            # self._IControl = np.array(unp[49:55])
+            self._tcp = np.array(unp[55:61]) # _tcpActual
+            self._tcp_speed = np.array(unp[61:67])
+            self._tcp_force = np.array(unp[67:73])
+            # self._tcpTarget = np.array(unp[73:79])
+            # self._tcpSpeedTarget = np.array(unp[79:85])
+            self._digit_in = int(unp[85])
+            # self._motorTemperatures = np.array(unp[86:92])
+            # # self._controllerTimer = unp[92]
+            # self._robotMode = int(unp[94]) # Confirm Safety: 1, Running: 7
+            # self._accelerometer = np.array(unp[108:111])
+            # self._speedScaling = float(unp[117])
+            # self._momentum = float(unp[118])
+            # self._digit_out = int(unp[130])
+            # self._state = int(unp[131])
+            # self._elbowPosition = np.array(unp[132:135])
+            # self._elbowVelocity = np.array(unp[135:138])
 
             if self._csys:
                 with self._csys_lock:
@@ -338,14 +334,8 @@ class URRTMonitor(threading.Thread):
                 qActual=self._qActual,
                 qTarget=self._qTarget,
                 tcp=self._tcp,
-                tcp_force=self._tcp_force,
-                joint_temperature=self._joint_temperature,
-                joint_voltage=self._joint_voltage,
-                joint_current=self._joint_current,
-                main_voltage=self._main_voltage,
-                robot_voltage=self._robot_voltage,
-                robot_current=self._robot_current)
-    getALLData = get_all_data
+                tcp_force=self._tcp_force
+            )
 
     def stop(self):
         # print(self.__class__.__name__+': Stopping')
@@ -353,11 +343,22 @@ class URRTMonitor(threading.Thread):
 
     def close(self):
         self.stop()
-        self.join()
+        try:
+            self.join()
+        except RuntimeError:
+            pass
+        except Exception as ex:
+            raise(ex)
+        with self._dataEvent: #wake up any thread that may be waiting for data before we close. Should we do that?
+            self._dataEvent.notifyAll()
 
     def run(self):
         self._stop_event = False
-        self._rtSock.connect((self._urHost, 30003))
-        while not self._stop_event:
-            self.__recv_rt_data()
-        self._rtSock.close()
+        try:
+            self._rtSock.connect((self._urHost, 30003))
+            while not self._stop_event:
+                self.__recv_rt_data()
+            self._rtSock.close()
+        except OSError as ex:
+            # print("RT", ex)
+            pass

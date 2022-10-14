@@ -23,8 +23,8 @@ class Robot(URRobot):
     and includes support for setting a reference coordinate system
     """
 
-    def __init__(self, host, use_rt=False, urFirm=None):
-        URRobot.__init__(self, host, use_rt, urFirm)
+    def __init__(self, host, use_rt=False):
+        URRobot.__init__(self, host, use_rt)
         self.csys = m3d.Transform()
 
     def _get_lin_dist(self, target):
@@ -144,7 +144,7 @@ class Robot(URRobot):
         trans = self.get_pose(wait)
         return trans.pos
 
-    def speedl(self, velocities, acc, min_time):
+    def speedl(self, velocities, acc, min_time = None):
         """
         move at given velocities until minimum min_time seconds
         """
@@ -153,7 +153,7 @@ class Robot(URRobot):
         vels = np.concatenate((v.array, w.array))
         return self.speedx("speedl", vels, acc, min_time)
 
-    def speedj(self, velocities, acc, min_time):
+    def speedj(self, velocities, acc, min_time = None):
         """
         move at given joint velocities until minimum min_time seconds
         """

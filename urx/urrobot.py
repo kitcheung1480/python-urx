@@ -7,6 +7,11 @@ http://support.universal-robots.com/URRobot/RemoteAccess
 import logging
 import numbers
 import collections
+from math import pi
+import numpy as np
+from scipy.spatial.transform import Rotation as R
+import warnings
+warnings.filterwarnings("ignore")
 
 from urx import urrtmon
 from urx import ursecmon
@@ -14,7 +19,6 @@ from urx import ursecmon
 __author__ = "Olivier Roulet-Dubonnet"
 __copyright__ = "Copyright 2011-2015, Sintef Raufoss Manufacturing"
 __license__ = "LGPLv3"
-
 
 class RobotException(Exception):
     pass
@@ -31,25 +35,25 @@ class URRobot(object):
     Rmq: A program sent to the robot i executed immendiatly and any running program is stopped
     """
 
-    def __init__(self, host, use_rt=False, urFirm=None):
+    def __init__(self, host, use_rt=False):
         self.logger = logging.getLogger("urx")
         self.host = host
-        self.urFirm = urFirm
         self.csys = None
 
         self.logger.debug("Opening secondary monitor socket")
-        self.secmon = ursecmon.SecondaryMonitor(self.host)  # data from robot at 10Hz
 
-        self.rtmon = None
-        if use_rt:
-            self.rtmon = self.get_realtime_monitor()
         # precision of joint movem used to wait for move completion
         # the value must be conservative! otherwise we may wait forever
         self.joinEpsilon = 0.01
         # It seems URScript is  limited in the character length of floats it accepts
         self.max_float_length = 6  # FIXME: check max length!!!
 
-        self.secmon.wait()  # make sure we get data from robot before letting clients access our methods
+        self.rtmon = None
+        if use_rt:
+            self.rtmon = urrtmon.URRTMonitor(self.host)  # som information is only available on rt interface
+            # self.get_realtime_monitor()
+        self.secmon = ursecmon.SecondaryMonitor(self.host)  # data from robot at 10Hz
+        # self.secmon.wait()  # make sure we get data from robot before letting clients access our methods
 
     def __repr__(self):
         return "Robot Object (IP=%s, state=%s)" % (self.host, self.secmon.get_all_data()["RobotModeData"])
@@ -85,14 +89,17 @@ class URRobot(object):
         program is interrupted
         """
         self.logger.info("Sending program: " + prog)
-        self.secmon.send_program(prog)
+        if self.rtmon == None:
+            self.secmon.send_program(prog) # 10 Hz
+        else:
+            self.rtmon.send_program(prog) # 500 Hz
 
     def get_tcp_force(self, wait=True):
         """
         return measured force in TCP
         if wait==True, waits for next packet before returning
         """
-        return self.rtmon.getTCFForce(wait)
+        return self.rtmon.tcp_force(wait)
 
     def get_force(self, wait=True):
         """
@@ -104,56 +111,6 @@ class URRobot(object):
         for i in tcpf:
             force += i**2
         return force**0.5
-
-    def get_joint_temperature(self, wait=True):
-        """
-        return measured joint temperature
-        if wait==True, waits for next packet before returning
-        """
-        return self.rtmon.getJOINTTemperature(wait)
-    
-    def get_joint_voltage(self, wait=True):
-        """
-        return measured joint voltage
-        if wait==True, waits for next packet before returning
-        """
-        return self.rtmon.getJOINTVoltage(wait)
-    
-    def get_joint_current(self, wait=True):
-        """
-        return measured joint current
-        if wait==True, waits for next packet before returning
-        """
-        return self.rtmon.getJOINTCurrent(wait)
-    
-    def get_main_voltage(self, wait=True):
-        """
-        return measured Safety Control Board: Main voltage
-        if wait==True, waits for next packet before returning
-        """
-        return self.rtmon.getMAINVoltage(wait)
-
-    def get_robot_voltage(self, wait=True):
-        """
-        return measured Safety Control Board: Robot voltage (48V)
-        if wait==True, waits for next packet before returning
-        """
-        return self.rtmon.getROBOTVoltage(wait)
-
-    def get_robot_current(self, wait=True):
-        """
-        return measured Safety Control Board: Robot current
-        if wait==True, waits for next packet before returning
-        """
-        return self.rtmon.getROBOTCurrent(wait)
-
-    def get_all_rt_data(self, wait=True):
-        """
-        return all data parsed from robot real-time interace as a dict
-        if wait==True, waits for next packet before returning
-        """
-        return self.rtmon.getALLData(wait)
-
 
     def set_tcp(self, tcp):
         """
@@ -258,63 +215,91 @@ class URRobot(object):
         if threshold is not reached within timeout, an exception is raised
         """
         self.logger.debug("Waiting for move completion using threshold %s and target %s", threshold, target)
-        start_dist = self._get_dist(target, joints)
-        if threshold is None:
-            threshold = start_dist * 0.8
-            if threshold < 0.001:  # roboten precision is limited
-                threshold = 0.001
-            self.logger.debug("No threshold set, setting it to %s", threshold)
-        count = 0
-        while True:
-            if not self.is_running():
-                raise RobotException("Robot stopped")
-            dist = self._get_dist(target, joints)
-            self.logger.debug("distance to target is: %s, target dist is %s", dist, threshold)
-            if not self.secmon.is_program_running():
-                if dist < threshold:
-                    self.logger.debug("we are threshold(%s) close to target, move has ended", threshold)
-                    return
-                count += 1
-                if count > timeout * 10:
-                    raise RobotException("Goal not reached but no program has been running for {} seconds. dist is {}, threshold is {}, target is {}, current pose is {}".format(timeout, dist, threshold, target, URRobot.getl(self)))
-            else:
-                count = 0
-
-    def _get_dist(self, target, joints=False):
         if joints:
-            return self._get_joints_dist(target)
+            start_dist = self._get_joints_dist(target)
+            if threshold is None:
+                threshold = max(start_dist * 0.8, 0.01)
+                self.logger.debug("No threshold set, setting it to %s", threshold)
+            count = 0
+            while True:
+                if not self.is_running():
+                    raise RobotException("Robot stopped")
+                dist = self._get_joints_dist(target)
+                self.logger.debug("distance to target is: %s, target dist is %s", dist, threshold)
+                if not self.secmon.is_program_running():
+                    if dist < threshold:
+                        self.logger.debug("we are threshold(%s) close to target, move has ended", threshold)
+                        return
+                    count += 1
+                    if count > timeout * 10:
+                        raise RobotException("Goal not reached but no program has been running for {} seconds. dist is {}, threshold is {}, target is {}, current pose is {}".format(timeout, dist, threshold, target, URRobot.getl(self)))
+                else:
+                    count = 0
         else:
-            return self._get_lin_dist(target)
+            start_dist, start_angle = self._get_lin_dist(target)
+            if threshold is None:
+                threshold = [max(start_dist * 0.01, 0.01), max(start_angle * 0.01, 0.01) * 2]
+                self.logger.debug("No threshold set, setting it to %s", threshold)
+            if isinstance(threshold, numbers.Number):
+                threshold = [threshold, threshold * 2]
+            count = 0
+            while True:
+                if not self.is_running():
+                    raise RobotException("Robot stopped")
+                dist, angle = self._get_lin_dist(target)
+                self.logger.debug("distance to target is: %s, target dist is %s", [dist, angle], threshold)
+                if not self.secmon.is_program_running():
+                    if dist < threshold[0] or angle < threshold[1]:
+                        self.logger.debug("we are threshold(%s) close to target, move has ended", threshold)
+                        return
+                    count += 1
+                    if count > timeout * 10:
+                        raise RobotException("Goal not reached but no program has been running for {} seconds. dist is {}, threshold is {}, target is {}, current pose is {}".format(timeout, dist, threshold, target, URRobot.getl(self)))
+                else:
+                    count = 0
 
     def _get_lin_dist(self, target):
         # FIXME: we have an issue here, it seems sometimes the axis angle received from robot
+        # FIXED by providing absolut distance and rotation distance(in 3D rotation space: SO3)
         pose = URRobot.getl(self, wait=True)
         dist = 0
         for i in range(3):
             dist += (target[i] - pose[i]) ** 2
-        for i in range(3, 6):
-            dist += ((target[i] - pose[i]) / 5) ** 2  # arbitraty length like
-        return dist ** 0.5
+        dist = dist ** 0.5
+
+        target_R = R.from_rotvec(target[3:6]).as_quat()
+        pose_R = R.from_rotvec(pose[3:6]).as_quat()
+        angle = np.arccos(target_R @ pose_R)
+        angle = min(angle, pi - angle)
+
+        return dist, angle
 
     def _get_joints_dist(self, target):
         joints = self.getj(wait=True)
         dist = 0
         for i in range(6):
-            dist += (target[i] - joints[i]) ** 2
+            dist_i = (target[i] - joints[i]) % (pi * 2)
+            dist += min(dist_i, pi*2 - dist_i) ** 2
         return dist ** 0.5
 
     def getj(self, wait=False):
         """
         get joints position
         """
-        jts = self.secmon.get_joint_data(wait)
-        return [jts["q_actual0"], jts["q_actual1"], jts["q_actual2"], jts["q_actual3"], jts["q_actual4"], jts["q_actual5"]]
+        if self.rtmon == None:
+            jts = self.secmon.get_joint_data(wait)
+            return [jts["q_actual0"], jts["q_actual1"], jts["q_actual2"], jts["q_actual3"], jts["q_actual4"], jts["q_actual5"]]
+        else:
+            return self.rtmon.getActual(wait).tolist()
 
-    def speedx(self, command, velocities, acc, min_time):
+    def speedx(self, command, velocities, acc, min_time = None):
         vels = [round(i, self.max_float_length) for i in velocities]
         vels.append(acc)
-        vels.append(min_time)
-        prog = "{}([{},{},{},{},{},{}], {}, {})".format(command, *vels)
+        if min_time == None:
+            prog = "{}([{},{},{},{},{},{}], a={})".format(command, *vels)
+        else:
+            vels.append(min_time)
+            prog = "{}([{},{},{},{},{},{}], a={}, t={})".format(command, *vels)
         self.send_program(prog)
 
     def movej(self, joints, acc=0.1, vel=0.05, wait=True, relative=False, threshold=None):
@@ -348,28 +333,6 @@ class URRobot(object):
         """
         return self.movex("servoc", tpose, acc=acc, vel=vel, wait=wait, relative=relative, threshold=threshold)
 
-    def servoj(self, tjoints, acc=0.01, vel=0.01, t=0.1, lookahead_time=0.2, gain=100, wait=True, relative=False, threshold=None):
-        """
-        Send a servoj command to the robot. See URScript documentation.
-        """
-        if relative:
-            l = self.getj()
-            tjoints = [v + l[i] for i, v in enumerate(tjoints)]
-        prog = self._format_servo("servoj", tjoints, acc=acc, vel=vel, t=t, lookahead_time=lookahead_time, gain=gain)
-        self.send_program(prog)
-        if wait:
-            self._wait_for_move(tjoints[:6], threshold=threshold, joints=True)
-            return self.getj()
-
-    def _format_servo(self, command, tjoints, acc=0.01, vel=0.01, t=0.1, lookahead_time=0.2, gain=100, prefix=""):
-        tjoints = [round(i, self.max_float_length) for i in tjoints]
-        tjoints.append(acc)
-        tjoints.append(vel)
-        tjoints.append(t)
-        tjoints.append(lookahead_time)
-        tjoints.append(gain)
-        return "{}({}[{},{},{},{},{},{}], a={}, v={}, t={}, lookahead_time={}, gain={})".format(command, prefix, *tjoints)
-
     def _format_move(self, command, tpose, acc, vel, radius=0, prefix=""):
         tpose = [round(i, self.max_float_length) for i in tpose]
         tpose.append(acc)
@@ -395,12 +358,15 @@ class URRobot(object):
         """
         get TCP position
         """
+        # if self.rtmon == None:
         pose = self.secmon.get_cartesian_info(wait)
         if pose:
             pose = [pose["X"], pose["Y"], pose["Z"], pose["Rx"], pose["Ry"], pose["Rz"]]
         if _log:
             self.logger.debug("Received pose from robot: %s", pose)
         return pose
+        # else:
+        #     return self.rtmon.tcp_pose(wait).tolist()
 
     def movec(self, pose_via, pose_to, acc=0.01, vel=0.01, wait=True, threshold=None):
         """
@@ -504,9 +470,9 @@ class URRobot(object):
         close connection to robot and stop internal thread
         """
         self.logger.info("Closing sockets to robot")
-        self.secmon.close()
         if self.rtmon:
-            self.rtmon.stop()
+            self.rtmon.close()
+        self.secmon.close()
 
     def set_freedrive(self, val, timeout=60):
         """
@@ -534,31 +500,7 @@ class URRobot(object):
         """
         if not self.rtmon:
             self.logger.info("Opening real-time monitor socket")
-            self.rtmon = urrtmon.URRTMonitor(self.host, self.urFirm)  # som information is only available on rt interface
+            self.rtmon = urrtmon.URRTMonitor(self.host)  # som information is only available on rt interface
             self.rtmon.start()
         self.rtmon.set_csys(self.csys)
         return self.rtmon
-
-    def translate(self, vect, acc=0.01, vel=0.01, wait=True, command="movel"):
-        """
-        move tool in base coordinate, keeping orientation
-        """
-        p = self.getl()
-        p[0] += vect[0]
-        p[1] += vect[1]
-        p[2] += vect[2]
-        return self.movex(command, p, vel=vel, acc=acc, wait=wait)
-
-    def up(self, z=0.05, acc=0.01, vel=0.01):
-        """
-        Move up in csys z
-        """
-        p = self.getl()
-        p[2] += z
-        self.movel(p, acc=acc, vel=vel)
-
-    def down(self, z=0.05, acc=0.01, vel=0.01):
-        """
-        Move down in csys z
-        """
-        self.up(-z, acc, vel)
